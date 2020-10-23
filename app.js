@@ -3,7 +3,7 @@ require('dotenv').config();
 const config = require('./config');
 const bot = require('./lib/bot');
 const error = require('./lib/errors_handler');
-const { User } = require('./models/index');
+const { User, Message } = require('./models/index');
 const tags = {
   bold: 'b',
   italic: 'i',
@@ -17,6 +17,21 @@ bot.on('message', async msg => {
   if(msg.entities && msg.entities[0].type === 'bot_command') return;
   const user = await User.findOne({ userId: msg.from.id }).catch(err => error('mongo', err));
   handleMsg(msg, user);
+});
+
+bot.on('channel_post', async msg => {
+  const { reply_to_message, text } = msg;
+
+  if(config.telegram.feedback != msg.chat.id) return;
+  if(!reply_to_message) return;
+  if(reply_to_message.forward_from || reply_to_message.forward_sender_name) {
+    const messageId = reply_to_message.message_id;
+    Message.findOne({ messageId })
+    .then(message => {
+      replyToUser(message.userId, message.botMessageId, text)
+    })
+    .catch(err => error('mongo', err));
+  }
 });
 
 bot.onText(/\/start/, msg => {
@@ -51,6 +66,18 @@ const createUser = async(userId, username, firstname, language) => {
   }).catch(err => error('mongo', err, { userId }));
 }
 
+const saveMessage = async(messageId, userId, botMessageId) => {
+  let message = new Message({userId, messageId, botMessageId});
+  await message.save()
+  .then(data => {
+    if(data) return data;
+  }).catch(err => error('mongo', err, { userId }));
+}
+
+const replyToUser = async(userId, botMsgId, message) => bot
+  .sendMessage(userId, message, {reply_to_message_id: botMsgId })
+  .catch(err => error('tg', err));
+
 const isPrivate = msg => msg.chat.type === 'private';
 const getCommand = msg => msg.text.match(/^\/([a-zA-Z]+)/);
 const setMediaGroup = (text, media_group_id) => {
@@ -81,11 +108,14 @@ const textToMarkdown = (text, entities) => {
 
 const handleMsg = (msg, user) => {
   if(user.anonymous) anonymousMsg(msg);
-  else notAnonymousMsg(msg);
+  else notAnonymousMsg(msg, user);
 };
 
-const notAnonymousMsg = msg => {
-  bot.forwardMessage(config.telegram.feedback, msg.chat.id, msg.message_id);
+const notAnonymousMsg = (msg, user) => {
+  bot.forwardMessage(config.telegram.feedback, msg.chat.id, msg.message_id)
+  .then(message => {
+    saveMessage(message.message_id, user.userId, msg.message_id);
+  })
 };
 
 const anonymousMsg = msg => {
